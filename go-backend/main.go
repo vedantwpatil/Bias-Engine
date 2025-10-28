@@ -3,24 +3,28 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/vedantwpatil/bias-engine/models"
 	"github.com/vedantwpatil/bias-engine/scraper"
 )
 
-// Define custom template functions
 var funcMap = template.FuncMap{
 	"mul": func(a, b float64) float64 {
 		return a * b
 	},
 }
 
-// Parse templates with custom functions
-var templates = template.Must(template.New("").Funcs(funcMap).ParseGlob("templates/*.html"))
+var (
+	templates     = template.Must(template.New("").Funcs(funcMap).ParseGlob("templates/*.html"))
+	nlpServiceURL = getEnv("NLP_SERVICE_URL", "http://localhost:8000")
+)
 
 type CompanyAnalysis struct {
 	Company       string
@@ -56,23 +60,22 @@ func analyzeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Scrape articles
-	articles, err := scraper.ScrapeCompanyNews(company, 10)
+	startTime := time.Now()
+
+	// Scrape articles - increase to 100
+	articles, err := scraper.ScrapeCompanyNews(company, 100)
 	if err != nil {
 		log.Printf("Scraping error: %v", err)
 		http.Error(w, "Failed to scrape articles", http.StatusInternalServerError)
 		return
 	}
 
-	// Analyze each article
-	for i := range articles {
-		sentiment, err := analyzeSentiment(articles[i].Body)
-		if err != nil {
-			log.Printf("Analysis error: %v", err)
-			continue
-		}
-		articles[i].Sentiment = sentiment
-	}
+	log.Printf("Scraped %d articles in %v", len(articles), time.Since(startTime))
+
+	// Analyze articles concurrently
+	articles = analyzeSentimentConcurrent(articles, 10) // 10 concurrent workers
+
+	log.Printf("Total processing time: %v", time.Since(startTime))
 
 	// Calculate risk score
 	analysis := CompanyAnalysis{
@@ -87,29 +90,57 @@ func analyzeHandler(w http.ResponseWriter, r *http.Request) {
 	templates.ExecuteTemplate(w, "company.html", analysis)
 }
 
-func apiCompanyHandler(w http.ResponseWriter, r *http.Request) {
-	company := r.URL.Query().Get("name")
-	if company == "" {
-		http.Error(w, "Company parameter required", http.StatusBadRequest)
-		return
+// Concurrent sentiment analysis with worker pool
+func analyzeSentimentConcurrent(articles []models.Article, numWorkers int) []models.Article {
+	var wg sync.WaitGroup
+	articlesChan := make(chan int, len(articles))
+
+	// Launch workers
+	for range numWorkers {
+		wg.Go(func() {
+			for idx := range articlesChan {
+				sentiment, err := analyzeSentiment(articles[idx].Body)
+				if err != nil {
+					log.Printf("Analysis error for article %d: %v", idx, err)
+					// Set neutral sentiment on error
+					articles[idx].Sentiment = models.Sentiment{
+						Positive: 0.33,
+						Neutral:  0.34,
+						Negative: 0.33,
+					}
+					continue
+				}
+				articles[idx].Sentiment = sentiment
+			}
+		})
 	}
 
-	articles, err := scraper.ScrapeCompanyNews(company, 5)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// Send work to workers
+	for i := range articles {
+		articlesChan <- i
 	}
+	close(articlesChan)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(articles)
+	// Wait for all workers to finish
+	wg.Wait()
+
+	return articles
 }
 
 func analyzeSentiment(text string) (models.Sentiment, error) {
+	if text == "" {
+		return models.Sentiment{}, fmt.Errorf("empty text")
+	}
+
 	payload := map[string]string{"text": text}
 	jsonData, _ := json.Marshal(payload)
 
-	resp, err := http.Post(
-		"http://localhost:5000/analyze",
+	client := &http.Client{
+		Timeout: 15 * time.Second, // Increased timeout
+	}
+
+	resp, err := client.Post(
+		nlpServiceURL+"/analyze",
 		"application/json",
 		bytes.NewBuffer(jsonData),
 	)
@@ -117,6 +148,10 @@ func analyzeSentiment(text string) (models.Sentiment, error) {
 		return models.Sentiment{}, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return models.Sentiment{}, fmt.Errorf("status %d", resp.StatusCode)
+	}
 
 	var sentiment models.Sentiment
 	if err := json.NewDecoder(resp.Body).Decode(&sentiment); err != nil {
@@ -126,6 +161,23 @@ func analyzeSentiment(text string) (models.Sentiment, error) {
 	return sentiment, nil
 }
 
+func apiCompanyHandler(w http.ResponseWriter, r *http.Request) {
+	company := r.URL.Query().Get("name")
+	if company == "" {
+		http.Error(w, "Company parameter required", http.StatusBadRequest)
+		return
+	}
+
+	articles, err := scraper.ScrapeCompanyNews(company, 50)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(articles)
+}
+
 func calculateAvgSentiment(articles []models.Article) float64 {
 	if len(articles) == 0 {
 		return 0
@@ -133,7 +185,6 @@ func calculateAvgSentiment(articles []models.Article) float64 {
 
 	total := 0.0
 	for _, article := range articles {
-		// Calculate weighted sentiment (positive - negative)
 		score := article.Sentiment.Positive - article.Sentiment.Negative
 		total += score
 	}
@@ -144,16 +195,13 @@ func calculateAvgSentiment(articles []models.Article) float64 {
 func determineRisk(articles []models.Article) string {
 	avgSentiment := calculateAvgSentiment(articles)
 
-	// Calculate bias (uncertainty) from neutral scores
 	avgNeutral := 0.0
 	for _, article := range articles {
 		avgNeutral += article.Sentiment.Neutral
 	}
 	avgNeutral /= float64(len(articles))
 
-	// High neutral = high bias/uncertainty = risky
 	biasMultiplier := 1.0 - avgNeutral
-
 	adjustedScore := avgSentiment * biasMultiplier
 
 	if adjustedScore > 0.3 {
@@ -164,4 +212,11 @@ func determineRisk(articles []models.Article) string {
 		return "High Risk"
 	}
 	return "Very High Risk"
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

@@ -1,15 +1,23 @@
 from flask import Flask, request, jsonify
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+import torch.nn.functional as F
 import logging
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Load FinBERT model
 MODEL_NAME = "ProsusAI/finbert"
+
+# This approach has proper type hints
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+model.eval()
+
+logging.info(f"Model loaded on {device}")
 
 
 @app.route("/health", methods=["GET"])
@@ -25,31 +33,32 @@ def analyze():
         if not data or "text" not in data:
             return jsonify({"error": "Missing 'text' field"}), 400
 
-        text = data["text"]
+        text = data["text"][:512]
 
-        # Truncate to avoid token limit
-        if len(text) > 512:
-            text = text[:512]
+        if not text.strip():
+            return jsonify({"error": "Empty text"}), 400
 
-        # Tokenize and analyze
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+        inputs = tokenizer(
+            text, return_tensors="pt", truncation=True, max_length=512, padding=True
+        ).to(device)
 
         with torch.no_grad():
             outputs = model(**inputs)
-            predictions = torch.nn.functional.softmax(outputs.logits, dim=1)
+            probabilities = F.softmax(outputs.logits, dim=1)[0]
 
-        # FinBERT returns: [positive, negative, neutral]
-        scores = predictions[0].tolist()
+        result = {
+            "positive": float(probabilities[0]),
+            "negative": float(probabilities[1]),
+            "neutral": float(probabilities[2]),
+        }
 
-        result = {"positive": scores[0], "negative": scores[1], "neutral": scores[2]}
-
-        logging.info(f"Analysis complete: {result}")
+        logging.info(f"Analysis: {result}")
         return jsonify(result)
 
     except Exception as e:
-        logging.error(f"Analysis error: {str(e)}")
+        logging.error(f"Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=True, threaded=True)
