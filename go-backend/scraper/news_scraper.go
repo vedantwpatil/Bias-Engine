@@ -7,7 +7,8 @@ type Article struct {
 	bias, confidence    float64
 }
 
-func main() {
+func Scrape() {
+	// Test
 	companiesToScrape := []string{"microsoft", "nvidia"}
 	visitedUrls := make(map[string]bool)
 
