@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vedantwpatil/bias-engine/backtest"
 	"github.com/vedantwpatil/bias-engine/models"
 	"github.com/vedantwpatil/bias-engine/scraper"
+	"github.com/vedantwpatil/bias-engine/storage"
 )
 
 var funcMap = template.FuncMap{
@@ -24,6 +26,29 @@ var funcMap = template.FuncMap{
 	"add": func(a, b int) int {
 		return a + b
 	},
+}
+
+var (
+	templates      = template.Must(template.New("").Funcs(funcMap).ParseGlob("templates/*.html"))
+	nlpServiceURL  = getEnv("NLP_SERVICE_URL", "http://localhost:8000")
+	db             *storage.Database
+	backtestEngine *backtest.BacktestEngine
+)
+
+// Initialize database and backtest engine
+func init() {
+	var err error
+
+	// Initialize database
+	db, err = storage.NewDatabase("./sentiment_history.db")
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	// Initialize backtest engine
+	backtestEngine = backtest.NewBacktestEngine(db)
+
+	log.Println("Database and backtest engine initialized")
 }
 
 var sourceCredibility = map[string]float64{
@@ -41,11 +66,6 @@ var sourceCredibility = map[string]float64{
 	"Forbes":              0.85,
 	"Investing.com":       0.7,
 }
-
-var (
-	templates     = template.Must(template.New("").Funcs(funcMap).ParseGlob("templates/*.html"))
-	nlpServiceURL = getEnv("NLP_SERVICE_URL", "http://localhost:8000")
-)
 
 type ArticleWeight struct {
 	Recency     float64
@@ -113,6 +133,7 @@ func main() {
 	http.HandleFunc("/", homeHandler)
 	http.HandleFunc("/analyze", analyzeHandler)
 	http.HandleFunc("/api/company", apiCompanyHandler)
+	http.HandleFunc("/backtest", backtestHandler)
 
 	log.Println("Server starting on :8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -180,14 +201,20 @@ func analyzeHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Total processing time: %v", time.Since(startTime))
 
-	// Calculate risk score (now using weighted sentiment)
+	// Calculate risk score
 	analysis := CompanyAnalysis{
 		Company:       company,
-		Articles:      articles, // Now sorted by impact
+		Articles:      articles,
 		AvgSentiment:  calculateWeightedSentiment(articles),
-		RiskScore:     determineRiskWeighted(articles),
+		RiskScore:     determineRisk(articles),
 		TotalArticles: len(articles),
 		LastUpdated:   time.Now(),
+	}
+
+	// Save to database
+	err = db.SaveAnalysis(company, analysis.AvgSentiment, analysis.RiskScore, analysis.TotalArticles)
+	if err != nil {
+		log.Printf("Failed to save analysis: %v", err)
 	}
 
 	templates.ExecuteTemplate(w, "company.html", analysis)
@@ -379,4 +406,30 @@ func calculateConsensus(articles []models.Article) float64 {
 	consensus := 1.0 / (1.0 + stdDev)
 
 	return consensus
+}
+
+func backtestHandler(w http.ResponseWriter, r *http.Request) {
+	company := r.URL.Query().Get("company")
+	ticker := r.URL.Query().Get("ticker")
+
+	if company == "" || ticker == "" {
+		http.Error(w, "company and ticker parameters required", http.StatusBadRequest)
+		return
+	}
+
+	// Backtest last 30 days
+	endDate := time.Now()
+	startDate := endDate.AddDate(0, 0, -30)
+
+	log.Printf("Starting backtest for %s (%s)", company, ticker)
+
+	result, err := backtestEngine.RunBacktest(company, ticker, startDate, endDate)
+	if err != nil {
+		log.Printf("Backtest error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
