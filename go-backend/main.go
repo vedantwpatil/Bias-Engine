@@ -1,92 +1,167 @@
-package scraper
+package main
 
 import (
-	"fmt"
+	"bytes"
+	"encoding/json"
+	"html/template"
 	"log"
-	"sentiment-analyzer/models"
-	"strings"
+	"net/http"
 	"time"
 
-	"github.com/gocolly/colly/v2"
+	"github.com/vedantwpatil/bias-engine/models"
+	"github.com/vedantwpatil/bias-engine/scraper"
 )
 
-func ScrapeCompanyNews(company string, maxArticles int) ([]models.Article, error) {
-	articles := make([]models.Article, 0)
+// Define custom template functions
+var funcMap = template.FuncMap{
+	"mul": func(a, b float64) float64 {
+		return a * b
+	},
+}
 
-	c := colly.NewCollector(
-		colly.AllowedDomains("news.google.com", "www.google.com"),
-		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
-	)
+// Parse templates with custom functions
+var templates = template.Must(template.New("").Funcs(funcMap).ParseGlob("templates/*.html"))
 
-	// Rate limiting
-	c.Limit(&colly.LimitRule{
-		DomainGlob:  "*",
-		Delay:       2 * time.Second,
-		RandomDelay: 1 * time.Second,
-	})
+type CompanyAnalysis struct {
+	Company       string
+	Articles      []models.Article
+	AvgSentiment  float64
+	RiskScore     string
+	TotalArticles int
+	LastUpdated   time.Time
+}
 
-	// Extract article links from Google News
-	c.OnHTML("article", func(e *colly.HTMLElement) {
-		if len(articles) >= maxArticles {
-			return
-		}
+func main() {
+	http.HandleFunc("/", homeHandler)
+	http.HandleFunc("/analyze", analyzeHandler)
+	http.HandleFunc("/api/company", apiCompanyHandler)
 
-		title := e.ChildText("h3, h4")
-		link := e.ChildAttr("a", "href")
+	log.Println("Server starting on :8080...")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
 
-		if title != "" && link != "" {
-			// Clean up Google News redirect link
-			if strings.Contains(link, "./articles") {
-				link = "https://news.google.com" + link[1:]
-			}
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	templates.ExecuteTemplate(w, "index.html", nil)
+}
 
-			article := models.Article{
-				Title:     title,
-				URL:       link,
-				Source:    extractSource(e.Text),
-				Timestamp: time.Now(),
-				Body:      extractPreview(e.Text), // Use preview for demo
-			}
+func analyzeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-			articles = append(articles, article)
-			log.Printf("Found article: %s", title)
-		}
-	})
+	company := r.FormValue("company")
+	if company == "" {
+		http.Error(w, "Company name required", http.StatusBadRequest)
+		return
+	}
 
-	c.OnError(func(r *colly.Response, err error) {
-		log.Printf("Request error: %v", err)
-	})
-
-	searchURL := fmt.Sprintf("https://news.google.com/search?q=%s+stock+news", company)
-	log.Printf("Scraping: %s", searchURL)
-
-	err := c.Visit(searchURL)
+	// Scrape articles
+	articles, err := scraper.ScrapeCompanyNews(company, 10)
 	if err != nil {
-		return nil, err
+		log.Printf("Scraping error: %v", err)
+		http.Error(w, "Failed to scrape articles", http.StatusInternalServerError)
+		return
 	}
 
-	if len(articles) == 0 {
-		return nil, fmt.Errorf("no articles found for company: %s", company)
-	}
-
-	return articles, nil
-}
-
-func extractSource(text string) string {
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
-		if len(line) > 3 && len(line) < 50 && !strings.Contains(line, "ago") {
-			return strings.TrimSpace(line)
+	// Analyze each article
+	for i := range articles {
+		sentiment, err := analyzeSentiment(articles[i].Body)
+		if err != nil {
+			log.Printf("Analysis error: %v", err)
+			continue
 		}
+		articles[i].Sentiment = sentiment
 	}
-	return "Unknown"
+
+	// Calculate risk score
+	analysis := CompanyAnalysis{
+		Company:       company,
+		Articles:      articles,
+		AvgSentiment:  calculateAvgSentiment(articles),
+		RiskScore:     determineRisk(articles),
+		TotalArticles: len(articles),
+		LastUpdated:   time.Now(),
+	}
+
+	templates.ExecuteTemplate(w, "company.html", analysis)
 }
 
-func extractPreview(text string) string {
-	// Take first 200 chars as preview for demo purposes
-	// In production, you'd fetch full article content
-	if len(text) > 200 {
-		return text[:200]
+func apiCompanyHandler(w http.ResponseWriter, r *http.Request) {
+	company := r.URL.Query().Get("name")
+	if company == "" {
+		http.Error(w, "Company parameter required", http.StatusBadRequest)
+		return
 	}
-	return text
+
+	articles, err := scraper.ScrapeCompanyNews(company, 5)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(articles)
+}
+
+func analyzeSentiment(text string) (models.Sentiment, error) {
+	payload := map[string]string{"text": text}
+	jsonData, _ := json.Marshal(payload)
+
+	resp, err := http.Post(
+		"http://localhost:5000/analyze",
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return models.Sentiment{}, err
+	}
+	defer resp.Body.Close()
+
+	var sentiment models.Sentiment
+	if err := json.NewDecoder(resp.Body).Decode(&sentiment); err != nil {
+		return models.Sentiment{}, err
+	}
+
+	return sentiment, nil
+}
+
+func calculateAvgSentiment(articles []models.Article) float64 {
+	if len(articles) == 0 {
+		return 0
+	}
+
+	total := 0.0
+	for _, article := range articles {
+		// Calculate weighted sentiment (positive - negative)
+		score := article.Sentiment.Positive - article.Sentiment.Negative
+		total += score
+	}
+
+	return total / float64(len(articles))
+}
+
+func determineRisk(articles []models.Article) string {
+	avgSentiment := calculateAvgSentiment(articles)
+
+	// Calculate bias (uncertainty) from neutral scores
+	avgNeutral := 0.0
+	for _, article := range articles {
+		avgNeutral += article.Sentiment.Neutral
+	}
+	avgNeutral /= float64(len(articles))
+
+	// High neutral = high bias/uncertainty = risky
+	biasMultiplier := 1.0 - avgNeutral
+
+	adjustedScore := avgSentiment * biasMultiplier
+
+	if adjustedScore > 0.3 {
+		return "Safe Investment"
+	} else if adjustedScore > 0 {
+		return "Moderate Risk"
+	} else if adjustedScore > -0.3 {
+		return "High Risk"
+	}
+	return "Very High Risk"
 }
