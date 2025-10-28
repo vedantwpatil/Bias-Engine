@@ -29,7 +29,7 @@ type RSSFeed struct {
 func ScrapeCompanyNews(company string, maxArticles int) ([]models.Article, error) {
 	articles := make([]models.Article, 0)
 
-	// Use Google News RSS feed instead
+	// Use Google News RSS feed
 	rssURL := fmt.Sprintf("https://news.google.com/rss/search?q=%s+stock&hl=en-US&gl=US&ceid=US:en", company)
 
 	log.Printf("Fetching RSS feed: %s", rssURL)
@@ -96,7 +96,6 @@ func extractSource(title string) string {
 }
 
 func stripHTML(s string) string {
-	// Simple HTML tag removal (or use a library like bluemonday)
 	result := ""
 	inTag := false
 	for _, char := range s {

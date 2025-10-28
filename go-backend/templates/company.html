@@ -5,8 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Analysis: {{.Company}}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .impact-badge {
+            font-weight: bold;
+        }
+        .impact-high { background-color: #dc3545; }
+        .impact-medium { background-color: #ffc107; }
+        .impact-low { background-color: #6c757d; }
+    </style>
 </head>
 <body>
+    <!-- Loading spinner -->
     <div id="loading" class="container mt-5 text-center">
         <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;">
             <span class="visually-hidden">Loading...</span>
@@ -14,71 +23,88 @@
         <h3 class="mt-3">Analyzing articles...</h3>
         <p class="text-muted">This may take 20-30 seconds for 100 articles</p>
     </div>
-    <div class="container mt-4">
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <h1>{{.Company}} - Sentiment Analysis</h1>
-            <a href="/" class="btn btn-secondary">New Analysis</a>
+
+    <!-- Main content -->
+    <div id="content" style="display: none;">
+        <div class="container mt-4">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1>{{.Company}} - Sentiment Analysis</h1>
+                <a href="/" class="btn btn-secondary">New Analysis</a>
+            </div>
+            
+            <div class="row mb-4">
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h5 class="card-title">Risk Assessment</h5>
+                            <h2 class="{{if eq .RiskScore "Safe Investment"}}text-success{{else if eq .RiskScore "Moderate Risk"}}text-warning{{else}}text-danger{{end}}">
+                                {{.RiskScore}}
+                            </h2>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h5 class="card-title">Avg Sentiment</h5>
+                            <h2>{{printf "%.2f" .AvgSentiment}}</h2>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h5 class="card-title">Articles Analyzed</h5>
+                            <h2>{{.TotalArticles}}</h2>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <h3>Articles by Impact <small class="text-muted">(most influential first)</small></h3>
+            <p class="text-muted">Articles are ranked by credibility, recency, and sentiment strength</p>
+            
+            {{range $index, $article := .Articles}}
+            <div class="card mb-3">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div class="flex-grow-1">
+                            <div class="d-flex align-items-center mb-2">
+                                <span class="badge bg-primary me-2">#{{add $index 1}}</span>
+                                <span class="badge impact-badge {{if gt $article.ImpactScore 0.7}}impact-high{{else if gt $article.ImpactScore 0.4}}impact-medium{{else}}impact-low{{end}}">
+                                    Impact: {{printf "%.1f%%" (mul $article.ImpactScore 100)}}
+                                </span>
+                            </div>
+                            <h5 class="card-title">{{$article.Title}}</h5>
+                            <p class="text-muted">{{$article.Source}} • {{$article.Timestamp.Format "Jan 2, 2006"}}</p>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-3">
+                        <div class="col-4">
+                            <small>Positive: <span class="badge bg-success">{{printf "%.1f%%" (mul $article.Sentiment.Positive 100)}}</span></small>
+                        </div>
+                        <div class="col-4">
+                            <small>Neutral: <span class="badge bg-secondary">{{printf "%.1f%%" (mul $article.Sentiment.Neutral 100)}}</span></small>
+                        </div>
+                        <div class="col-4">
+                            <small>Negative: <span class="badge bg-danger">{{printf "%.1f%%" (mul $article.Sentiment.Negative 100)}}</span></small>
+                        </div>
+                    </div>
+                    
+                    <a href="{{$article.URL}}" target="_blank" class="btn btn-sm btn-outline-primary mt-2">Read Article</a>
+                </div>
+            </div>
+            {{end}}
         </div>
-        
-        <div class="row mb-4">
-            <div class="col-md-4">
-                <div class="card text-center">
-                    <div class="card-body">
-                        <h5 class="card-title">Risk Assessment</h5>
-                        <h2 class="{{if eq .RiskScore "Safe Investment"}}text-success{{else if eq .RiskScore "Moderate Risk"}}text-warning{{else}}text-danger{{end}}">
-                            {{.RiskScore}}
-                        </h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="card text-center">
-                    <div class="card-body">
-                        <h5 class="card-title">Avg Sentiment</h5>
-                        <h2>{{printf "%.2f" .AvgSentiment}}</h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="card text-center">
-                    <div class="card-body">
-                        <h5 class="card-title">Articles Analyzed</h5>
-                        <h2>{{.TotalArticles}}</h2>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <h3>Recent Articles</h3>
-        {{range .Articles}}
-        <div class="card mb-3">
-            <div class="card-body">
-                <h5 class="card-title">{{.Title}}</h5>
-                <p class="text-muted">{{.Source}} • {{.Timestamp.Format "Jan 2, 2006"}}</p>
-                
-                <div class="row mt-3">
-                    <div class="col-4">
-                        <small>Positive: <span class="badge bg-success">{{printf "%.1f%%" (mul .Sentiment.Positive 100)}}</span></small>
-                    </div>
-                    <div class="col-4">
-                        <small>Neutral: <span class="badge bg-secondary">{{printf "%.1f%%" (mul .Sentiment.Neutral 100)}}</span></small>
-                    </div>
-                    <div class="col-4">
-                        <small>Negative: <span class="badge bg-danger">{{printf "%.1f%%" (mul .Sentiment.Negative 100)}}</span></small>
-                    </div>
-                </div>
-                
-                <a href="{{.URL}}" target="_blank" class="btn btn-sm btn-outline-primary mt-2">Read Article</a>
-            </div>
-        </div>
-        {{end}}
     </div>
+
+    <script>
+        // Show content when page fully loads
+        window.addEventListener('load', function() {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('content').style.display = 'block';
+        });
+    </script>
 </body>
 </html>
-<script>
-    // Show content when page fully loads
-    window.addEventListener('load', function() {
-        document.getElementById('loading').style.display = 'none';
-        document.getElementById('content').style.display = 'block';
-    });
-</script>

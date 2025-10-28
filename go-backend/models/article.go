@@ -3,12 +3,13 @@ package models
 import "time"
 
 type Article struct {
-	Title     string    `json:"title"`
-	URL       string    `json:"url"`
-	Source    string    `json:"source"`
-	Body      string    `json:"body"`
-	Timestamp time.Time `json:"timestamp"`
-	Sentiment Sentiment `json:"sentiment"`
+	Title       string    `json:"title"`
+	URL         string    `json:"url"`
+	Source      string    `json:"source"`
+	Body        string    `json:"body"`
+	Timestamp   time.Time `json:"timestamp"`
+	Sentiment   Sentiment `json:"sentiment"`
+	ImpactScore float64   `json:"impact_score"`
 }
 
 type Sentiment struct {
